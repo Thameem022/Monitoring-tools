@@ -1,17 +1,36 @@
----
-title: Case Study 1
-emoji: 💬
-colorFrom: yellow
-colorTo: purple
-sdk: gradio
-sdk_version: 5.42.0
-app_file: app.py
-pinned: false
-hf_oauth: true
-hf_oauth_scopes:
-- inference-api
-license: mit
-short_description: The Approval Annihilator
----
+# 🌱 Sustainable.ai - MLOps Monitoring
 
-An example chatbot using [Gradio](https://gradio.app), [`huggingface_hub`](https://huggingface.co/docs/huggingface_hub/v0.22.2/en/index), and the [Hugging Face Inference API](https://huggingface.co/docs/api-inference/index).
+A sustainability chatbot with Prometheus metrics monitoring.
+
+## Quick Start
+
+1. Create `.env` file:
+   ```bash
+   echo "HF_TOKEN=your_token_here" > .env
+   ```
+
+2. Start all services:
+   ```bash
+   docker-compose up -d
+   ```
+
+3. Access services:
+   - **Gradio App**: http://localhost:7860
+   - **Prometheus**: http://localhost:9090
+   - **Grafana**: http://localhost:3000 (admin/admin)
+   - **Metrics**: http://localhost:8000/metrics
+
+## Metrics
+
+- `app_model_usage_total` - Model invocations by type (local/remote)
+- `app_carbon_footprint_kg` - Calculated carbon footprints
+- `app_streaming_chunks_total` - Streaming chunks received
+- `app_message_length_chars` - User message lengths
+- `app_inference_time_seconds` - Model inference time
+- `app_active_users_current` - Current active users
+
+## Stop Services
+
+```bash
+docker-compose down
+```

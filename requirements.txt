@@ -3,3 +3,4 @@ torch
 gradio[oauth]
 sentencepiece
 tiktoken
+prometheus_client

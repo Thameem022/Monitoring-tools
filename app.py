@@ -1,7 +1,9 @@
 import os
+import time
 import gradio as gr
 from huggingface_hub import InferenceClient,login
 from transformers import pipeline
+from prometheus_client import start_http_server, Counter, Summary, Histogram, Gauge
 
 HF_TOKEN = os.getenv("HF_TOKEN")
 if not HF_TOKEN:
@@ -9,6 +11,13 @@ if not HF_TOKEN:
 
 login(token=HF_TOKEN)
 
+# --- Prometheus metrics ---
+MODEL_USAGE           = Counter('app_model_usage_total',             'Total number of model invocations', ['model_type'])
+CARBON_FOOTPRINT      = Summary('app_carbon_footprint_kg',          'Calculated carbon footprint in kg CO2')
+STREAMING_CHUNKS      = Counter('app_streaming_chunks_total',       'Total number of streaming chunks received')
+MESSAGE_LENGTH        = Histogram('app_message_length_chars',       'Length of user messages in characters', buckets=[10, 50, 100, 200, 500, 1000])
+INFERENCE_TIME        = Summary('app_inference_time_seconds',        'Time spent in model inference')
+ACTIVE_USERS          = Gauge('app_active_users_current',           'Current number of active users')
 
 # --- Emissions factors --------------------------------------------------------
 EMISSIONS_FACTORS = {
@@ -61,52 +70,75 @@ def respond(
     vegan_meals,
     use_local_model,   # checkbox
 ):
-    # Compute personalized footprint summary
-    footprint, stats = calculate_footprint(
-        car_km, bus_km, train_km, air_km,
-        meat_meals, vegetarian_meals, vegan_meals
-    )
+    # Track active users and message metrics
+    ACTIVE_USERS.inc()
+    MESSAGE_LENGTH.observe(len(message))
+    
+    try:
+        # Compute personalized footprint summary
+        footprint, stats = calculate_footprint(
+            car_km, bus_km, train_km, air_km,
+            meat_meals, vegetarian_meals, vegan_meals
+        )
+        # Track carbon footprint
+        CARBON_FOOTPRINT.observe(footprint)
 
-    custom_prompt = (
-        f"This user’s estimated weekly footprint is **{footprint:.1f} kg CO2**.\n"
-        f"That’s roughly planting {stats['trees']} trees 🌳 or taking {stats['flights']} short flights ✈️.\n"
-        f"Breakdown includes transportation and food choices.\n"
-        f"Your job is to give practical, friendly suggestions to lower this footprint.\n"
-        f"{system_message}"
-    )
+        custom_prompt = (
+            f"This user's estimated weekly footprint is **{footprint:.1f} kg CO2**.\n"
+            f"That's roughly planting {stats['trees']} trees 🌳 or taking {stats['flights']} short flights ✈️.\n"
+            f"Breakdown includes transportation and food choices.\n"
+            f"Your job is to give practical, friendly suggestions to lower this footprint.\n"
+            f"{system_message}"
+        )
 
-    # Build chat context
-    chat_context = custom_prompt + "\n"
-    for turn in (history or []):
-        role, content = turn["role"], turn["content"]
-        chat_context += f"{role.upper()}: {content}\n"
-    chat_context += f"USER: {message}\nASSISTANT:"
+        # Build chat context
+        chat_context = custom_prompt + "\n"
+        for turn in (history or []):
+            role, content = turn["role"], turn["content"]
+            chat_context += f"{role.upper()}: {content}\n"
+        chat_context += f"USER: {message}\nASSISTANT:"
 
-    # --- Local branch ---------------------------------------------------------
-    if use_local_model:
-        out = pipe(chat_context, max_new_tokens=300, do_sample=True)
-        yield out[0]["generated_text"]
-        return
+        # --- Local branch ---------------------------------------------------------
+        if use_local_model:
+            MODEL_USAGE.labels(model_type='local').inc()
+            inference_start = time.time()
+            out = pipe(chat_context, max_new_tokens=300, do_sample=True)
+            result = out[0]["generated_text"]
+            INFERENCE_TIME.observe(time.time() - inference_start)
+            ACTIVE_USERS.dec()
+            yield result
+            return
 
-    model_id = "openai/gpt-oss-20b"
-    client = InferenceClient(model=model_id, token=HF_TOKEN)
+        model_id = "openai/gpt-oss-20b"
+        MODEL_USAGE.labels(model_type='remote').inc()
+        client = InferenceClient(model=model_id, token=HF_TOKEN)
 
-    response = ""
-    for chunk in client.chat_completion(
-        [{"role": "system", "content": custom_prompt}] + (history or []) + [{"role": "user", "content": message}],
-        max_tokens=3000,
-        temperature=0.7,
-        top_p=0.95,
-        stream=True,
-    ):
-        token_piece = ""
-        if chunk.choices and getattr(chunk.choices[0], "delta", None):
-            token_piece = chunk.choices[0].delta.content or ""
-        else:
-            token_piece = getattr(chunk, "message", {}).get("content", "") or ""
-        if token_piece:
-            response += token_piece
-            yield response
+        inference_start = time.time()
+        response = ""
+        for chunk in client.chat_completion(
+            [{"role": "system", "content": custom_prompt}] + (history or []) + [{"role": "user", "content": message}],
+            max_tokens=3000,
+            temperature=0.7,
+            top_p=0.95,
+            stream=True,
+        ):
+            token_piece = ""
+            if chunk.choices and getattr(chunk.choices[0], "delta", None):
+                token_piece = chunk.choices[0].delta.content or ""
+            else:
+                token_piece = getattr(chunk, "message", {}).get("content", "") or ""
+            if token_piece:
+                STREAMING_CHUNKS.inc()
+                response += token_piece
+                yield response
+        
+        # Track inference time after streaming completes
+        INFERENCE_TIME.observe(time.time() - inference_start)
+        ACTIVE_USERS.dec()
+    
+    except Exception as e:
+        ACTIVE_USERS.dec()
+        raise
 
 # --- UI -----------------------------------------------------------------------
 demo = gr.ChatInterface(
@@ -131,4 +163,5 @@ demo = gr.ChatInterface(
 )
 
 if __name__ == "__main__":
+    start_http_server(8000)
     demo.launch()
