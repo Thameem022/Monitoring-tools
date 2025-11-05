@@ -66,7 +66,7 @@ services:
 
 networks:
   monitoring:
-    driver: bridge
+    external: true
 
 volumes:
   grafana-storage:
